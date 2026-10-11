@@ -924,5 +924,24 @@
           "update.profile.on.first.login": "missing"
         }
       }
-    ]
+    ],
+    "identityProviders": [
+      {
+        "alias": "yandex",
+        "providerId": "yandex",
+        "enabled": true,
+        "updateProfileFirstLoginMode": "on",
+        "storeToken": true,
+        "firstBrokerLoginFlowAlias": "first broker login",
+        "config": {
+          "hideOnLoginPage": "false",
+          "acceptsPromptNoneForwardFromClient": "false",
+          "clientId": "${YANDEX_CLIENT_ID}",
+          "disableUserInfo": "false",
+          "syncMode": "FORCE",
+          "clientSecret": "${YANDEX_CLIENT_SECRET}"
+        }
+      }
+    ],
+    "identityProviderMappers": []
   }

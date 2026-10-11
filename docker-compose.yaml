@@ -17,7 +17,7 @@ services:
       timeout: 5s
       retries: 30
   keycloak:
-    image: quay.io/keycloak/keycloak:21.1
+    build: ./keycloak
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
@@ -26,6 +26,8 @@ services:
       KC_DB_USERNAME: keycloak_user
       KC_DB_PASSWORD: keycloak_password
       KC_HOSTNAME_URL: http://localhost:8080
+      YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID}
+      YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET}
     command:
       - start-dev
       - --import-realm
