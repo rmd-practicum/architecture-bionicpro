@@ -11,6 +11,11 @@ services:
       - ./postgres-keycloak-data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-U", "keycloak_user", "-d", "keycloak_db"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
   keycloak:
     image: quay.io/keycloak/keycloak:21.1
     environment:
@@ -20,7 +25,8 @@ services:
       KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
       KC_DB_USERNAME: keycloak_user
       KC_DB_PASSWORD: keycloak_password
-    command: 
+      KC_HOSTNAME_URL: http://localhost:8080
+    command:
       - start-dev
       - --import-realm
     volumes:
@@ -28,7 +34,8 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - keycloak_db
+      keycloak_db:
+        condition: service_healthy
   frontend:
     build:
       context: ./frontend
@@ -40,3 +47,19 @@ services:
       REACT_APP_KEYCLOAK_URL: http://localhost:8080
       REACT_APP_KEYCLOAK_REALM: reports-realm
       REACT_APP_KEYCLOAK_CLIENT_ID: reports-frontend
+
+  bionicpro-auth:
+    build:
+      context: ./bionicpro-auth
+    ports:
+      - "8000:8000"
+    environment:
+      PORT: "8000"
+      CLIENT_ID: bionicpro-auth
+      CLIENT_SECRET: tLao8ON3C7w3PGvpa5ObqzcuyZwEyBBh
+      ISSUER: http://localhost:8080/realms/reports-realm
+      DISCOVERY_URL: http://keycloak:8080/realms/reports-realm/.well-known/openid-configuration
+      FRONTEND_URL: http://localhost:3000
+    depends_on:
+      - keycloak
+    restart: on-failure
