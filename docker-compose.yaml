@@ -60,3 +60,13 @@ services:
     depends_on:
       - keycloak
     restart: on-failure
+
+  openldap:
+    image: osixia/openldap:1.5.0
+    command: --copy-service
+    volumes:
+      - ./ldap/config.ldif:/container/service/slapd/assets/config/bootstrap/ldif/50-bootstrap.ldif
+    environment:
+      - LDAP_ORGANISATION=example-com
+      - LDAP_DOMAIN=example.com
+      - LDAP_ADMIN_PASSWORD=admin
