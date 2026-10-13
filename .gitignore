@@ -8,3 +8,5 @@ venv
 # Draw.io backup files
 .$*.bkp
 /.env
+/clickhouse/data
+__pycache__/
