@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -31,6 +32,7 @@ type Config struct {
 	Scopes       []string `envconfig:"SCOPES" default:"openid"`
 	FrontendURL  string   `envconfig:"FRONTEND_URL" required:"true"`
 	DiscoveryURL string   `envconfig:"DISCOVERY_URL"`
+	ReportsAPI   string   `envconfig:"REPORTS_API_URL" required:"true"`
 }
 
 type User struct {
@@ -193,6 +195,36 @@ func main() {
 
 		http.Redirect(w, r, cfg.FrontendURL+safeReturnTo(sessionMgr.PopString(ctx, "returnTo")), http.StatusFound)
 	}, provider))
+
+	http.Handle("GET /api/reports", protected(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		token, _ := ctx.Value(accessTokenKey{}).(string)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.ReportsAPI+"/report?"+r.URL.RawQuery, nil)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			slog.Error("reports api call failed", "error", err)
+			http.Error(w, "reports unavailable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			slog.Error("reports api rejected the access token")
+			http.Error(w, "reports unavailable", http.StatusBadGateway)
+			return
+		}
+
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}))
 
 	err = http.ListenAndServe(fmt.Sprintf(":%s", cfg.Port), withCORS(cfg.FrontendURL, sessionMgr.LoadAndSave(http.DefaultServeMux)))
 	if !errors.Is(err, http.ErrServerClosed) {

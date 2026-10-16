@@ -1,0 +1,17 @@
+FROM golang:1.27-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux go build -a -o bionicpro-api .
+
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates
+WORKDIR /root/
+COPY --from=builder /app/bionicpro-api .
+
+EXPOSE 8000
+CMD ["./bionicpro-api"]

@@ -87,9 +87,27 @@ services:
       ISSUER: http://localhost:8080/realms/reports-realm
       DISCOVERY_URL: http://keycloak:8080/realms/reports-realm/.well-known/openid-configuration
       FRONTEND_URL: http://localhost:3000
+      REPORTS_API_URL: http://bionicpro-api:8000
     depends_on:
       - keycloak
     restart: on-failure
+
+  bionicpro-api:
+    build:
+      context: ./bionicpro-api
+    environment:
+      PORT: "8000"
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DATABASE: dwh
+      CLICKHOUSE_USERNAME: airflow
+      CLICKHOUSE_PASSWORD: airflow
+      OIDC_ISSUER: http://keycloak:8080/realms/reports-realm
+      OIDC_PUBLIC_ISSUER: http://localhost:8080/realms/reports-realm
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: on-failure
+
 
   openldap:
     image: osixia/openldap:1.5.0
