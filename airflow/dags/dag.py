@@ -28,7 +28,7 @@ GROUP BY c.email, report_date, c.full_name
 
 default_args = {
     "owner": "airflow",
-    "start_date": datetime(2026, 10, 1),
+    "start_date": datetime(2026, 10, 11),
 }
 
 

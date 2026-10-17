@@ -36,7 +36,7 @@ ENGINE = ReplacingMergeTree(lsn, is_deleted)
 ORDER BY (email, report_date);
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS dwh.customer_telemetry_mart_mv TO dwh.customer_telemetry_mart AS
-  SELECT c.email, toDate(t.event_time) AS report_date, c.name, count() AS events_count, avg(t.value) AS avg_value, min(t.value) AS min_value, max(t.value) AS max_value, c.lsn, c.is_deleted
+  SELECT c.email AS email, toDate(t.event_time) AS report_date, c.name AS name, count() AS events_count, avg(t.value) AS avg_value, min(t.value) AS min_value, max(t.value) AS max_value, c.lsn AS lsn, c.is_deleted AS is_deleted
   FROM dwh.crm_customers AS c
   INNER JOIN dwh.crm_devices AS d ON d.email = c.email
   INNER JOIN dwh.telemetry AS t ON t.device_id = d.device_id
