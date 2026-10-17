@@ -14,7 +14,7 @@ SELECT
     c.email,
     toDate(t.event_time) AS report_date,
     c.full_name,
-    count() AS events_cnt,
+    count() AS events_count,
     avg(t.value) AS avg_value,
     min(t.value) AS min_value,
     max(t.value) AS max_value,
@@ -22,6 +22,7 @@ SELECT
 FROM dwh.crm_clients AS c
 INNER JOIN dwh.crm_devices AS d ON d.email = c.email
 INNER JOIN dwh.telemetry AS t ON t.device_id = d.device_id
+WHERE toDate(t.event_time) = {report_date:Date}
 GROUP BY c.email, report_date, c.full_name
 """
 
@@ -76,17 +77,17 @@ def load_telemetry():
     reload_table("telemetry", ["device_id", "event_time", "value"], rows)
 
 
-def build_mart():
+def build_mart(ds):
     client = get_clickhouse_client()
-    client.command("TRUNCATE TABLE client_telemetry_mart")
-    client.command(MART_SQL)
+    client.command(MART_SQL, parameters={"report_date": ds})
 
 
 with DAG(
     "crm_telemetry_to_clickhouse",
     default_args=default_args,
     schedule="@daily",
-    catchup=False,
+    catchup=True,
+    max_active_runs=1,
 ) as dag:
     load_clients_task = PythonOperator(
         task_id="load_clients",

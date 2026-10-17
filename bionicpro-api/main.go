@@ -252,7 +252,7 @@ func fetchReport(ctx context.Context, dbConn driver.Conn, user string, date time
 
 	query := `
 SELECT report_date, events_count, avg_value, min_value, max_value
-FROM client_telemetry_mart
+FROM client_telemetry_mart FINAL
 WHERE email = ?
 AND report_date = toDate(?)
 `
