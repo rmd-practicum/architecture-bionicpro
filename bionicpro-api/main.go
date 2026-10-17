@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,16 +19,25 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/kelseyhightower/envconfig"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 type Config struct {
-	Port          string `envconfig:"PORT" required:"true"`
-	ClkAddr       string `envconfig:"CLICKHOUSE_ADDR" required:"true"`
-	ClkDB         string `envconfig:"CLICKHOUSE_DATABASE" required:"true"`
-	ClkUsername   string `envconfig:"CLICKHOUSE_USERNAME" required:"true"`
-	ClkPassword   string `envconfig:"CLICKHOUSE_PASSWORD" required:"true"`
-	OIDCIssuer    string `envconfig:"OIDC_ISSUER" required:"true"`
-	OIDCPubIssuer string `envconfig:"OIDC_PUBLIC_ISSUER" required:"true"`
+	Port          string        `envconfig:"PORT" required:"true"`
+	ClkAddr       string        `envconfig:"CLICKHOUSE_ADDR" required:"true"`
+	ClkDB         string        `envconfig:"CLICKHOUSE_DATABASE" required:"true"`
+	ClkUsername   string        `envconfig:"CLICKHOUSE_USERNAME" required:"true"`
+	ClkPassword   string        `envconfig:"CLICKHOUSE_PASSWORD" required:"true"`
+	OIDCIssuer    string        `envconfig:"OIDC_ISSUER" required:"true"`
+	OIDCPubIssuer string        `envconfig:"OIDC_PUBLIC_ISSUER" required:"true"`
+	S3Endpoint    string        `envconfig:"S3_ENDPOINT" required:"true"`
+	S3AccessKey   string        `envconfig:"S3_ACCESS_KEY" required:"true"`
+	S3SecretKey   string        `envconfig:"S3_SECRET_KEY" required:"true"`
+	S3Bucket      string        `envconfig:"S3_BUCKET" required:"true"`
+	CDNURL        string        `envconfig:"CDN_URL" required:"true"`
+	CDNSecret     string        `envconfig:"CDN_LINK_SECRET" required:"true"`
+	CDNLinkTTL    time.Duration `envconfig:"CDN_LINK_TTL" default:"5m"`
 }
 
 type Principal struct {
@@ -56,6 +69,19 @@ func main() {
 	}
 	defer dbConn.Close()
 
+	s3, err := minio.New(cfg.S3Endpoint, &minio.Options{
+		Creds: credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, ""),
+	})
+	if err != nil {
+		slog.Error("failed to create S3 client", "error", err)
+		os.Exit(1)
+	}
+
+	if err := ensureBucket(ctx, s3, cfg.S3Bucket); err != nil {
+		slog.Error("failed to prepare S3 bucket", "error", err)
+		os.Exit(1)
+	}
+
 	provider, err := oidc.NewProvider(oidc.InsecureIssuerURLContext(ctx, cfg.OIDCPubIssuer), cfg.OIDCIssuer)
 	if err != nil {
 		slog.Error("failed to instantiate OIDC provider", "error", err)
@@ -83,7 +109,13 @@ func main() {
 			return
 		}
 
-		report, err := fetchReport(ctx, dbConn, principal.Email, reportDate)
+		key := reportDate.Format(time.DateOnly) + "/" + principal.UserID + ".json"
+
+		_, err = s3.StatObject(ctx, cfg.S3Bucket, key, minio.StatObjectOptions{})
+		if minio.ToErrorResponse(err).Code == "NoSuchKey" {
+			err = storeReport(ctx, dbConn, s3, cfg.S3Bucket, key, principal.Email, reportDate)
+		}
+
 		if err != nil {
 			if errors.Is(err, errNoReport) {
 				http.NotFound(w, r)
@@ -95,9 +127,14 @@ func main() {
 			return
 		}
 
+		exp := time.Now().Add(cfg.CDNLinkTTL)
 		w.Header().Set("Content-Type", "application/json")
 		enc := json.NewEncoder(w)
-		if err := enc.Encode(report); err != nil {
+		err = enc.Encode(map[string]any{
+			"url":        signLink(cfg.CDNURL, cfg.CDNSecret, "/"+cfg.S3Bucket+"/"+key, exp),
+			"expires_at": exp.UTC(),
+		})
+		if err != nil {
 			slog.Error("failed to send report to the client", "error", err)
 		}
 	})
@@ -230,4 +267,44 @@ AND report_date = toDate(?)
 	}
 
 	return json.Marshal(rows)
+}
+
+func storeReport(ctx context.Context, dbConn driver.Conn, s3 *minio.Client, bucket, key, user string, date time.Time) error {
+	report, err := fetchReport(ctx, dbConn, user, date)
+	if err != nil {
+		return fmt.Errorf("failed to fetch report: %w", err)
+	}
+
+	_, err = s3.PutObject(ctx, bucket, key, bytes.NewReader(report), int64(len(report)), minio.PutObjectOptions{ContentType: "application/json"})
+	if err != nil {
+		return fmt.Errorf("failed to store report in s3: %w", err)
+	}
+
+	return nil
+}
+
+func signLink(base, secret, path string, exp time.Time) string {
+	e := strconv.FormatInt(exp.Unix(), 10)
+	sum := md5.Sum([]byte(e + path + " " + secret))
+	return base + path + "?md5=" + base64.RawURLEncoding.EncodeToString(sum[:]) + "&expires=" + e
+}
+
+func ensureBucket(ctx context.Context, s3 *minio.Client, bucket string) error {
+	exists, err := s3.BucketExists(ctx, bucket)
+	if err != nil {
+		return fmt.Errorf("failed to check if bucket exists: %w", err)
+	}
+
+	if !exists {
+		if err := s3.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+			return fmt.Errorf("faield to make bucket: %w", err)
+		}
+	}
+
+	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject"],"Resource":["arn:aws:s3:::%s/*"]}]}`, bucket)
+	if err := s3.SetBucketPolicy(ctx, bucket, policy); err != nil {
+		return fmt.Errorf("failed to set bucket policy: %w", err)
+	}
+
+	return nil
 }

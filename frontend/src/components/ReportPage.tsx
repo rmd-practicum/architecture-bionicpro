@@ -10,7 +10,7 @@ interface ReportRow {
   max_value: number;
 }
 
-const yesterdayUTC = () => new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+const DEFAULT_REPORT_DATE = '2026-10-11';
 
 const ReportPage: React.FC = () => {
   const [initialized, setInitialized] = useState(false);
@@ -18,7 +18,7 @@ const ReportPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<ReportRow[] | null>(null);
-  const [date, setDate] = useState(yesterdayUTC);
+  const [date, setDate] = useState(DEFAULT_REPORT_DATE);
 
   useEffect(() => {
     fetch(`${API_URL}/auth/me`, { credentials: 'include' })
@@ -52,7 +52,12 @@ const ReportPage: React.FC = () => {
         throw new Error(`Report request failed: ${response.status}`);
       }
 
-      setReport(await response.json());
+      const { url } = await response.json();
+      const file = await fetch(url);
+      if (!file.ok) {
+        throw new Error(`Report download failed: ${file.status}`);
+      }
+      setReport(await file.json());
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
