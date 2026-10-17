@@ -41,6 +41,8 @@ func principalFrom(ctx context.Context) (Principal, bool) {
 	return p, ok
 }
 
+var errNoReport = errors.New("no report found")
+
 func main() {
 	ctx := context.Background()
 
@@ -75,27 +77,21 @@ func main() {
 
 		slog.Info("authorized report request", "principal_id", principal.UserID, "username", principal.Username)
 
-		reportFrom, err := parseDate(r, "from")
+		reportDate, err := parseDate(r, "date")
 		if err != nil {
-			http.Error(w, "bad from value", http.StatusBadRequest)
+			http.Error(w, "bad date value", http.StatusBadRequest)
 			return
 		}
 
-		reportTo, err := parseDate(r, "to")
+		report, err := fetchReport(ctx, dbConn, principal.Email, reportDate)
 		if err != nil {
-			http.Error(w, "bad to value", http.StatusBadRequest)
-			return
-		}
+			if errors.Is(err, errNoReport) {
+				http.NotFound(w, r)
+				return
+			}
 
-		if reportFrom != nil && reportTo != nil && reportFrom.After(*reportTo) {
-			http.Error(w, "from cannot exceed to", http.StatusBadRequest)
-			return
-		}
-
-		report, err := fetchReport(ctx, dbConn, principal.Email, reportFrom, reportTo)
-		if err != nil {
 			slog.Error("failed to fetch report for user", "error", err)
-			w.WriteHeader(http.StatusInternalServerError)
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 
@@ -158,18 +154,18 @@ func unauthorized(w http.ResponseWriter) {
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
 
-func parseDate(r *http.Request, fieldName string) (*time.Time, error) {
+func parseDate(r *http.Request, fieldName string) (time.Time, error) {
 	val := r.URL.Query().Get(fieldName)
 	if val == "" {
-		return nil, nil
+		return time.Time{}, fmt.Errorf("field %q is missing", fieldName)
 	}
 
 	ret, err := time.Parse(time.DateOnly, val)
 	if err != nil {
-		return nil, err
+		return time.Time{}, err
 	}
 
-	return &ret, nil
+	return ret, nil
 }
 
 func connectDB(ctx context.Context, addr, db, username, password string) (driver.Conn, error) {
@@ -208,7 +204,7 @@ func connectDB(ctx context.Context, addr, db, username, password string) (driver
 	return conn, nil
 }
 
-func fetchReport(ctx context.Context, dbConn driver.Conn, user string, from, to *time.Time) (json.RawMessage, error) {
+func fetchReport(ctx context.Context, dbConn driver.Conn, user string, date time.Time) (json.RawMessage, error) {
 	type reportRow struct {
 		Date        time.Time `ch:"report_date" json:"date"`
 		EventsCount uint64    `ch:"events_count" json:"events_count"`
@@ -221,21 +217,17 @@ func fetchReport(ctx context.Context, dbConn driver.Conn, user string, from, to 
 SELECT report_date, events_count, avg_value, min_value, max_value
 FROM client_telemetry_mart
 WHERE email = ?
+AND report_date = toDate(?)
 `
-	args := []any{user}
-	if from != nil {
-		query += " AND report_date >= toDate(?)"
-		args = append(args, from.Format(time.DateOnly))
-	}
-	if to != nil {
-		query += " AND report_date <= toDate(?)"
-		args = append(args, to.Format(time.DateOnly))
-	}
-	query += " ORDER BY report_date"
 
 	rows := []reportRow{}
-	if err := dbConn.Select(ctx, &rows, query, args...); err != nil {
+	if err := dbConn.Select(ctx, &rows, query, user, date.Format(time.DateOnly)); err != nil {
 		return nil, fmt.Errorf("select report: %w", err)
 	}
+
+	if len(rows) == 0 {
+		return nil, errNoReport
+	}
+
 	return json.Marshal(rows)
 }

@@ -10,12 +10,15 @@ interface ReportRow {
   max_value: number;
 }
 
+const yesterdayUTC = () => new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
 const ReportPage: React.FC = () => {
   const [initialized, setInitialized] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<ReportRow[] | null>(null);
+  const [date, setDate] = useState(yesterdayUTC);
 
   useEffect(() => {
     fetch(`${API_URL}/auth/me`, { credentials: 'include' })
@@ -33,12 +36,16 @@ const ReportPage: React.FC = () => {
       setLoading(true);
       setError(null);
 
-      const response = await fetch(`${API_URL}/api/reports`, {
+      const response = await fetch(`${API_URL}/api/reports?date=${encodeURIComponent(date)}`, {
         credentials: 'include'
       });
 
       if (response.status === 401) {
         setAuthenticated(false);
+        return;
+      }
+      if (response.status === 404) {
+        setReport([]);
         return;
       }
       if (!response.ok) {
@@ -75,11 +82,23 @@ const ReportPage: React.FC = () => {
       <div className="p-8 bg-white rounded-lg shadow-md">
         <h1 className="text-2xl font-bold mb-6">Usage Reports</h1>
 
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => {
+            setDate(e.target.value);
+            setReport(null);
+            setError(null);
+          }}
+          disabled={loading}
+          className="mr-2 px-3 py-2 border rounded"
+        />
+
         <button
           onClick={downloadReport}
-          disabled={loading}
+          disabled={loading || !date}
           className={`px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 ${
-            loading ? 'opacity-50 cursor-not-allowed' : ''
+            loading || !date ? 'opacity-50 cursor-not-allowed' : ''
           }`}
         >
           {loading ? 'Generating Report...' : 'Download Report'}
