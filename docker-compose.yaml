@@ -262,5 +262,22 @@ services:
     depends_on:
       - minio
 
+  crm_db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: crm_db
+      POSTGRES_USER: crm_user
+      POSTGRES_PASSWORD: crm_password
+    volumes:
+        - ./crm-db:/docker-entrypoint-initdb.d
+        - ./postgres-crm-data:/var/lib/postgresql/data
+    ports:
+      - "5444:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-U", "keycloak_user", "-d", "keycloak_db"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
 volumes:
   minio_storage: {}

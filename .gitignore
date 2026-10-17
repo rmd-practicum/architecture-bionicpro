@@ -10,3 +10,4 @@ venv
 /.env
 /clickhouse/data
 __pycache__/
+/postgres-crm-data
