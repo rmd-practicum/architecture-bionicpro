@@ -1,2 +1,13 @@
 /postgres-keycloak-data
 2024__yandex-architecture-sso.code-workspace
+
+venv
+
+.DS_Store
+
+# Draw.io backup files
+.$*.bkp
+/.env
+/clickhouse/data
+__pycache__/
+/postgres-crm-data

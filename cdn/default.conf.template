@@ -1,0 +1,26 @@
+proxy_cache_path /var/cache/nginx/reports keys_zone=reports:10m max_size=100m inactive=1d use_temp_path=off;
+
+server {
+    listen 80;
+
+    location /reports/ {
+        secure_link $arg_md5,$arg_expires;
+        secure_link_md5 "$secure_link_expires$uri ${CDN_LINK_SECRET}";
+        if ($secure_link = "")  { return 403; }
+        if ($secure_link = "0") { return 410; }
+
+        proxy_pass http://minio:9000;
+        proxy_set_header Origin "";
+
+        proxy_cache reports;
+        proxy_cache_key $uri;
+        proxy_cache_valid 200 1h;
+
+        add_header X-Cache-Status $upstream_cache_status always;
+        add_header Access-Control-Allow-Origin http://localhost:3000 always;
+    }
+
+    location / {
+        return 404;
+    }
+}

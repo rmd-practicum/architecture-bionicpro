@@ -1,5 +1,33 @@
 version: '3.8'
 
+x-airflow-common: &airflow-common
+  build:
+    context: ./airflow
+    dockerfile: Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW__WEBSERVER__SECRET_KEY: 'your_airflow_webserver_sec_key'
+    _PIP_ADDITIONAL_REQUIREMENTS: ''
+    AIRFLOW_INPUT_DIR: '/opt/airflow/dag-inputs'
+    AIRFLOW_CONN_CLICKHOUSE_DEFAULT: '{"conn_type": "generic", "host": "clickhouse", "port": 8123, "login": "airflow", "password": "airflow", "schema": "dwh"}'
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/requirements.txt:/opt/airflow/requirements.txt
+    - ./airflow/data:/opt/airflow/sample_files
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    airflow-postgres:
+      condition: service_healthy
+    clickhouse:
+      condition: service_healthy
+
 services:
   keycloak_db:
     image: postgres:14
@@ -11,8 +39,13 @@ services:
       - ./postgres-keycloak-data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-U", "keycloak_user", "-d", "keycloak_db"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
   keycloak:
-    image: quay.io/keycloak/keycloak:21.1
+    build: ./keycloak
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
@@ -20,7 +53,10 @@ services:
       KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
       KC_DB_USERNAME: keycloak_user
       KC_DB_PASSWORD: keycloak_password
-    command: 
+      KC_HOSTNAME_URL: http://localhost:8080
+      YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID}
+      YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET}
+    command:
       - start-dev
       - --import-realm
     volumes:
@@ -28,7 +64,8 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - keycloak_db
+      keycloak_db:
+        condition: service_healthy
   frontend:
     build:
       context: ./frontend
@@ -37,6 +74,254 @@ services:
       - "3000:3000"
     environment:
       REACT_APP_API_URL: http://localhost:8000
-      REACT_APP_KEYCLOAK_URL: http://localhost:8080
-      REACT_APP_KEYCLOAK_REALM: reports-realm
-      REACT_APP_KEYCLOAK_CLIENT_ID: reports-frontend
+
+  bionicpro-auth:
+    build:
+      context: ./bionicpro-auth
+    ports:
+      - "8000:8000"
+    environment:
+      PORT: "8000"
+      CLIENT_ID: bionicpro-auth
+      CLIENT_SECRET: tLao8ON3C7w3PGvpa5ObqzcuyZwEyBBh
+      ISSUER: http://localhost:8080/realms/reports-realm
+      DISCOVERY_URL: http://keycloak:8080/realms/reports-realm/.well-known/openid-configuration
+      FRONTEND_URL: http://localhost:3000
+      REPORTS_API_URL: http://bionicpro-api:8000
+    depends_on:
+      - keycloak
+    restart: on-failure
+
+  bionicpro-api:
+    build:
+      context: ./bionicpro-api
+    environment:
+      PORT: "8000"
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DATABASE: dwh
+      CLICKHOUSE_USERNAME: airflow
+      CLICKHOUSE_PASSWORD: airflow
+      OIDC_ISSUER: http://keycloak:8080/realms/reports-realm
+      OIDC_PUBLIC_ISSUER: http://localhost:8080/realms/reports-realm
+      S3_ENDPOINT: minio:9000
+      S3_ACCESS_KEY: minio_user
+      S3_SECRET_KEY: minio_password
+      S3_BUCKET: reports
+      CDN_URL: http://localhost:8090
+      CDN_LINK_SECRET: cdnsecret123
+
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    restart: on-failure
+
+
+  openldap:
+    image: osixia/openldap:1.5.0
+    command: --copy-service
+    volumes:
+      - ./ldap/config.ldif:/container/service/slapd/assets/config/bootstrap/ldif/50-bootstrap.ldif
+    environment:
+      - LDAP_ORGANISATION=example-com
+      - LDAP_DOMAIN=example.com
+      - LDAP_ADMIN_PASSWORD=admin
+
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    environment:
+      CLICKHOUSE_DB: dwh
+      CLICKHOUSE_USER: airflow
+      CLICKHOUSE_PASSWORD: airflow
+    ports:
+      - "8123:8123"
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user $$CLICKHOUSE_USER --password $$CLICKHOUSE_PASSWORD -q 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    volumes:
+      - ./clickhouse/data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+
+  airflow-postgres:
+    image: postgres:16.0
+    volumes:
+      - ./airflow/db/init-db.sql:/docker-entrypoint-initdb.d/db.sql
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - airflow
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+  airflow-webserver:
+    <<: *airflow-common
+    ports:
+      - "8081:8080"
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: webserver
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8080/health || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-postgres:
+        condition: service_healthy
+      airflow-webserver:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8974/health || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  airflow-triggerer:
+    <<: *airflow-common
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: bash -c "airflow triggerer"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+  airflow-cli:
+    <<: *airflow-common
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-postgres:
+        condition: service_healthy
+    profiles:
+      - debug
+    command:
+      - bash
+      - -c
+      - airflow
+  airflow-init:
+    <<: *airflow-common
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-postgres:
+        condition: service_healthy
+    command: >
+      bash -c " airflow db init && airflow users create \ --username admin \ --firstname admin \ --lastname admin \ --role Admin \ --email admin@sample.ru \ --password admin
+
+      "
+
+  minio:
+    image: pgsty/silo
+    ports:
+      - "9001:9001"
+    volumes:
+      - minio_storage:/data
+    environment:
+      MINIO_ROOT_USER: minio_user
+      MINIO_ROOT_PASSWORD: minio_password
+    command: server --console-address ":9001" /data
+
+  nginx-cdn:
+    image: nginx:alpine
+    ports:
+      - "8090:80"
+    environment:
+      CDN_LINK_SECRET: cdnsecret123
+    volumes:
+      - ./cdn/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    depends_on:
+      - minio
+
+  crm_db:
+    image: postgres:14
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment:
+      POSTGRES_DB: crm_db
+      POSTGRES_USER: crm_user
+      POSTGRES_PASSWORD: crm_password
+    volumes:
+        - ./crm-db:/docker-entrypoint-initdb.d
+        - ./postgres-crm-data:/var/lib/postgresql/data
+    ports:
+      - "5444:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "localhost", "-U", "crm_user", "-d", "crm_db"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+
+  kafka-connect:
+    image: quay.io/debezium/connect:3.7.0.Final
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: crm-connect
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+    depends_on:
+      - kafka
+      - crm_db
+
+  kafka-connect-init:
+    image: curlimages/curl:8.22.0
+    depends_on:
+      - kafka-connect
+    volumes:
+      - ./debezium/crm-connector.json:/connector.json:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        until curl -sS --fail-with-body -X PUT -H "Content-Type: application/json" \
+          --data @/connector.json http://kafka-connect:8083/connectors/crm-connector/config
+        do sleep 5; done
+
+volumes:
+  minio_storage: {}
